@@ -1,0 +1,409 @@
+Postman Test Plan for Loan Scoring Backend
+1. Postman Setup
+Base URL: http://localhost:3000
+Recommended: Create a Postman environment with a variable:
+baseUrl = http://localhost:3000
+All requests below will be written as {{baseUrl}}/....
+2. Smoke Test – Health Check
+Request
+
+Method: GET
+URL: {{baseUrl}}/health
+Expected Response
+
+Status: 200 OK
+Body:
+{
+  "status": "ok"
+}
+If this works, the server and SQLite initialization are running correctly.
+
+3. Application Scoring Tests (Scenarios 1–7)
+All these tests use the endpoint:
+
+Endpoint: POST {{baseUrl}}/applications
+Headers:
+Content-Type: application/json
+The response for non-duplicate submissions has the shape:
+
+{
+  "application_id": "some-uuid",
+  "status": "approved | denied | flagged_for_review",
+  "score": 0,
+  "score_breakdown": {
+    "incomeVerification": 0,
+    "incomeLevel": 0,
+    "accountStability": 0,
+    "employmentStatus": 0,
+    "debtToIncome": 0
+  },
+  "decision": "auto_approve | manual_review | auto_deny"
+}
+3.1 Scenario 1 – Strong financials (Auto-approve)
+Body
+
+{
+  "applicant_name": "Jane Doe",
+  "email": "jane.doe@example.com",
+  "loan_amount": 1500,
+  "stated_monthly_income": 5000,
+  "employment_status": "employed",
+  "documented_monthly_income": 4800,
+  "bank_ending_balance": 3200,
+  "bank_has_overdrafts": false,
+  "bank_has_consistent_deposits": true,
+  "monthly_withdrawals": 1200,
+  "monthly_deposits": 4800
+}
+Expectation
+
+Status: 201 Created
+decision: auto_approve
+status: approved
+score should be relatively high (≥ 75 according to the config).
+Save application_id as scenario1_application_id in Postman for later tests.
+3.2 Scenario 2 – Weak financials (Auto-deny)
+Body
+
+{
+  "applicant_name": "Bob Smith",
+  "email": "bob.smith@example.com",
+  "loan_amount": 2000,
+  "stated_monthly_income": 1400,
+  "employment_status": "self-employed",
+  "documented_monthly_income": 1350,
+  "bank_ending_balance": 150,
+  "bank_has_overdrafts": true,
+  "bank_has_consistent_deposits": false,
+  "monthly_withdrawals": 1100,
+  "monthly_deposits": 1350
+}
+Expectation
+
+Status: 201 Created
+decision: auto_deny
+status: denied
+score should be clearly below the manual-review band (< 50).
+3.3 Scenario 3 – Weaker case with smaller loan (Flag for review)
+Reuses Bob’s data with smaller loan amount.
+
+Body
+
+{
+  "applicant_name": "Bob Smith",
+  "email": "bob.smith@example.com",
+  "loan_amount": 300,
+  "stated_monthly_income": 1400,
+  "employment_status": "self-employed",
+  "documented_monthly_income": 1350,
+  "bank_ending_balance": 150,
+  "bank_has_overdrafts": true,
+  "bank_has_consistent_deposits": false,
+  "monthly_withdrawals": 1100,
+  "monthly_deposits": 1350
+}
+Expectation
+
+Status: 201 Created
+decision: manual_review
+status: flagged_for_review
+This application should later appear in GET /admin/applications?status=flagged_for_review.
+3.4 Scenario 4 – Jane with larger loan (Flag for review)
+Reuses Jane’s financial data with a larger loan amount.
+
+Body
+
+{
+  "applicant_name": "Jane Doe",
+  "email": "jane.doe@example.com",
+  "loan_amount": 4500,
+  "stated_monthly_income": 5000,
+  "employment_status": "employed",
+  "documented_monthly_income": 4800,
+  "bank_ending_balance": 3200,
+  "bank_has_overdrafts": false,
+  "bank_has_consistent_deposits": true,
+  "monthly_withdrawals": 1200,
+  "monthly_deposits": 4800
+}
+Expectation
+
+Status: 201 Created
+decision: manual_review
+status: flagged_for_review
+3.5 Scenario 5 – No documents (Flag for review)
+Body
+
+{
+  "applicant_name": "Carol Tester",
+  "email": "carol.tester@example.com",
+  "loan_amount": 1000,
+  "stated_monthly_income": 8000,
+  "employment_status": "employed",
+  "documented_monthly_income": null,
+  "bank_ending_balance": null,
+  "bank_has_overdrafts": null,
+  "bank_has_consistent_deposits": null,
+  "monthly_withdrawals": null,
+  "monthly_deposits": null
+}
+Expectation
+
+Status: 201 Created
+decision: manual_review (due to missing documentation and conservative defaults).
+status: flagged_for_review.
+3.6 Scenario 6 – Dave Liar (Auto-deny)
+Body
+
+{
+  "applicant_name": "Dave Liar",
+  "email": "dave.liar@example.com",
+  "loan_amount": 2000,
+  "stated_monthly_income": 10000,
+  "employment_status": "employed",
+  "documented_monthly_income": 1400,
+  "bank_ending_balance": 150,
+  "bank_has_overdrafts": true,
+  "bank_has_consistent_deposits": false,
+  "monthly_withdrawals": 1100,
+  "monthly_deposits": 1400
+}
+Expectation
+
+Status: 201 Created
+decision: auto_deny (large discrepancy between stated and documented income).
+status: denied.
+3.7 Scenario 7 – Duplicate submission (Duplicate rejected)
+Use Scenario 1 body twice in a row within 5 minutes.
+
+First request: same as Scenario 1.
+
+Expectation: Same as Scenario 1 → 201 Created, approved, auto_approve.
+Second request: send the exact same JSON again.
+
+Expectation for the second request
+
+Status: 409 Conflict
+Body:
+{
+  "error_type": "DuplicateApplicationError",
+  "message": "...",
+  "original_application_id": "<id of the first submission>"
+}
+No new application is created.
+You can show this in Loom as the “duplicate prevention” demo.
+4. Webhook Disbursement Tests (Scenario 8 and Idempotency)
+4.1 Prepare an approved application
+Use the application_id from Scenario 1 (the auto-approved case).
+Store it in a Postman variable, e.g.:
+
+approved_application_id = <scenario1_application_id>
+4.2 First success webhook
+Request
+
+Method: POST
+URL: {{baseUrl}}/webhook/disbursement
+Headers:
+Content-Type: application/json
+Body:
+{
+  "application_id": "{{approved_application_id}}",
+  "status": "success",
+  "transaction_id": "txn_scenario8",
+  "timestamp": "2026-01-15T10:30:00Z"
+}
+Expected Response
+
+Status: 200 OK
+Body (shape):
+{
+  "disbursement_id": 1,
+  "application_id": "{{approved_application_id}}",
+  "status": "disbursed",
+  "transaction_id": "txn_scenario8",
+  "retry_count": 0,
+  "last_webhook_at": "2026-01-15T10:30:00Z"
+}
+A new row is created in disbursements with status disbursed.
+An audit event is recorded in disbursement_audit_events.
+4.3 Scenario 8 – Replay same transaction_id (Idempotent)
+Send the exact same request as 4.2 again:
+
+Expectation
+
+Status: 200 OK
+Body:
+{
+  "error_type": "WebhookReplayError",
+  "message": "...",
+  "replay": true
+}
+No additional state change:
+The disbursement remains disbursed.
+No double-disbursement occurs.
+An additional audit event is recorded to show a replay attempt.
+This demonstrates the required webhook idempotency for replays of the same transaction_id.
+
+4.4 Failure + “retry” with distinct transaction IDs
+To demonstrate the audit trail and retry counter with distinct transaction IDs:
+
+First failure
+
+{
+  "application_id": "{{approved_application_id}}",
+  "status": "failed",
+  "transaction_id": "txn_fail_1",
+  "timestamp": "2026-01-15T10:40:00Z"
+}
+Expectation
+
+Status: 200 OK
+Disbursement status: disbursement_failed
+retry_count: 1
+Second attempt with a new transaction ID (conceptual retry)
+
+{
+  "application_id": "{{approved_application_id}}",
+  "status": "failed",
+  "transaction_id": "txn_fail_2",
+  "timestamp": "2026-01-15T10:45:00Z"
+}
+Expectation
+
+Status: 200 OK
+Disbursement status remains disbursement_failed.
+retry_count: 2
+disbursement_audit_events contains two rows with different transaction_id values and increasing retry_sequence (1, 2), demonstrating a unique audit record per attempt.
+For Loom, this shows the tradeoff between idempotency per transaction_id (replays are safe) and a detailed audit trail across multiple attempts.
+
+5. Admin Endpoints Tests
+All admin endpoints are protected by Basic Auth.
+
+Default credentials (if you did not override env vars):
+Username: admin
+Password: password
+In Postman, add an “Authorization” header:
+Type: Basic Auth
+User: admin
+Password: password
+5.1 List applications flagged for review
+Request
+
+Method: GET
+URL: {{baseUrl}}/admin/applications?status=flagged_for_review
+Auth: Basic (admin / password)
+Expectation
+
+Status: 200 OK
+Body:
+{
+  "applications": [
+    {
+      "id": "...",
+      "status": "flagged_for_review",
+      ...
+    }
+  ]
+}
+Should include applications from Scenarios 3, 4, and 5.
+5.2 Get application detail
+Pick one application_id from the flagged list (e.g., Scenario 3).
+
+Request
+
+Method: GET
+URL: {{baseUrl}}/admin/applications/{{application_id}}
+Auth: Basic
+Expectation
+
+Status: 200 OK
+Body:
+{
+  "application": { ... },
+  "transitions": [
+    {
+      "from_status": null,
+      "to_status": "submitted",
+      ...
+    },
+    {
+      "from_status": "submitted",
+      "to_status": "processing",
+      ...
+    },
+    {
+      "from_status": "processing",
+      "to_status": "flagged_for_review",
+      ...
+    }
+  ],
+  "disbursements": [ ... ]
+}
+This shows the full score, current status, and state transition history, which is useful in the Loom walkthrough.
+5.3 Manual review – Approve, Deny, Partially Approve
+5.3.1 Approve a flagged application
+Request
+
+Method: POST
+URL: {{baseUrl}}/admin/applications/{{flagged_application_id}}/review
+Auth: Basic
+Body:
+{
+  "decision": "approved",
+  "note": "Approved after manual review.",
+  "reviewer_id": "admin-user-1"
+}
+Expectation
+
+Status: 204 No Content
+A new state transition flagged_for_review -> approved is added.
+A new row is written into manual_reviews.
+5.3.2 Partially approve with reduced amount
+Pick another flagged application.
+
+Body
+
+{
+  "decision": "partially_approved",
+  "note": "Approved with reduced amount after risk review.",
+  "approved_loan_amount": 800,
+  "reviewer_id": "admin-user-2"
+}
+Expectation
+
+Status: 204 No Content
+Application status becomes partially_approved.
+approved_loan_amount is updated to 800.
+A transition flagged_for_review -> partially_approved is recorded, demonstrating the mid-spec migration capability.
+5.3.3 Invalid review (forbidden transition)
+Try to review an application that is not flagged_for_review (e.g., an already denied application) with:
+
+{
+  "decision": "approved",
+  "note": "Trying to approve a denied application"
+}
+Expectation
+
+Status: 400 Bad Request (because of ValidationError) or an error thrown due to invalid state transition.
+This shows that the state machine is enforced and invalid transitions (e.g. denied -> processing or denied -> approved via admin) are rejected.
+6. Using the Webhook Simulator Script (Optional Alternative to Postman)
+Instead of sending Webhook requests from Postman, you can also use the included script:
+
+node scripts/simulate_disbursement.js --application-id <ID> --status success --transaction-id txn_demo
+Expectation
+
+The script prints:
+The target URL
+The JSON payload
+The HTTP status and response body
+You can call it multiple times (changing status and/or transaction-id) to demonstrate:
+Success → disbursed
+Failure with new transaction_id → incremented retry_count
+Replay with the same transaction_id → idempotent, WebhookReplayError in response and no state change
+You can now create a Postman collection following this document, then in your Loom:
+
+Start with /health.
+Walk through scenarios 1–7 on /applications.
+Demonstrate webhook success + replay on /webhook/disbursement.
+Show admin listing, detail, and manual review (including partially_approved).
+Optionally, show the Node script as an alternative webhook simulator.
