@@ -86,6 +86,39 @@ export async function getApplicationDetail(id: string): Promise<unknown | null> 
   };
 }
 
+/**
+ * Validates that a state transition is allowed by the state machine.
+ * Used by the demo endpoint POST /admin/applications/:id/transition (no DB update).
+ */
+export async function validateApplicationTransition(
+  id: string,
+  toStatus: ApplicationStatus,
+): Promise<{ currentStatus: ApplicationStatus; toStatus: ApplicationStatus }> {
+  const db = getDb();
+
+  const current = await new Promise<{ status: ApplicationStatus } | undefined>((resolve, reject) => {
+    db.get<{ status: ApplicationStatus }>(
+      'SELECT status FROM applications WHERE id = ?',
+      [id],
+      (err, row) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(row);
+        }
+      },
+    );
+  });
+
+  if (!current) {
+    throw new ValidationError('Application not found');
+  }
+
+  assertValidApplicationTransition(id, current.status, toStatus);
+
+  return { currentStatus: current.status, toStatus };
+}
+
 export async function reviewApplication(
   id: string,
   input: AdminReviewInput,

@@ -4,7 +4,7 @@ import { initDb } from './db/migrations';
 import { applicationRoutes } from './routes/applicationRoutes';
 import { webhookRoutes } from './routes/webhookRoutes';
 import { adminRoutes } from './routes/adminRoutes';
-import { ValidationError } from './domain/errors';
+import { ValidationError, InvalidStateTransitionError } from './domain/errors';
 
 async function bootstrap(): Promise<void> {
   await initDb();
@@ -25,6 +25,17 @@ async function bootstrap(): Promise<void> {
   app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     if (err instanceof ValidationError) {
       res.status(400).json({ error_type: err.name, message: err.message });
+      return;
+    }
+
+    if (err instanceof InvalidStateTransitionError) {
+      res.status(400).json({
+        error_type: err.name,
+        message: err.message,
+        applicationId: err.applicationId,
+        fromStatus: err.fromStatus,
+        toStatus: err.toStatus,
+      });
       return;
     }
 

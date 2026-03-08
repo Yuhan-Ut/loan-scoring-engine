@@ -157,19 +157,39 @@ Business rules:
 
 ### Retry vs audit log tradeoff
 
-- Idempotency requirement: the same `transaction_id` must not result in double disbursement or additional state changes.
-- Finance requirement: each retry attempt must be recorded as a distinct audit record.
+- **Product**: Disbursement should auto-retry up to 3 times on failure, then escalate to manual review.
+- **Finance**: Each retry must be logged as a separate audit event with a unique retry ID.
+- **Idempotency**: The same `transaction_id` replayed must not change state (no-op).
 
-Solution:
+**How the backend reconciles this:**
 
-- In `disbursement_audit_events`, use a **distinct primary key `id` + `retry_sequence`** to identify each logical attempt.
-- `transaction_id` represents the logical disbursement transaction: the same `transaction_id` can map to multiple audit rows with different `id` values.
-- The business layer uses `(application_id, transaction_id)` to determine whether the disbursement is already in a terminal state (for idempotency), while the audit layer uses `id`/`retry_sequence` to satisfy the “each retry is a separate record” requirement.
+- **Unique audit trail**: Every webhook call (success or failure) inserts one row into `disbursement_audit_events` with a unique `id` and `retry_sequence` (the attempt number). So each attempt is a distinct record.
+- **Idempotency**: When a webhook arrives with a `transaction_id` that has already been processed to a terminal state (disbursed, disbursement_failed, or flagged_for_review), the handler returns without updating state. Same `transaction_id` replayed = no-op.
+- **Auto-retry and escalation**: On each `failed` webhook we increment `retry_count`. After more than `maxDisbursementRetries` (e.g. 3) failures, we transition the disbursement and the application to `flagged_for_review` (reason: `disbursement_retries_exhausted`). So “3 failures → escalate” is enforced in the backend.
+
+**Who triggers the retries?**
+
+- **Demo**: The webhook simulator script sends multiple `failed` webhooks (e.g. with `transaction_id` `txn_fail_1`, `txn_fail_2`, `txn_fail_3`). Each is a distinct attempt; the backend counts them and escalates after the 3rd.
+- **Production**: The payment provider (or a backend job that calls them) sends each retry; each attempt typically has its own `transaction_id`. The backend only processes webhooks and enforces count + escalation.
 
 ### Webhook timeout handling
 
-- Config value `webhookTimeoutMs` defines the maximum time to wait for a webhook.
-- A background task or admin-triggered endpoint scans for records stuck in `disbursement_queued` without a successful webhook beyond this timeout, and flags the corresponding applications as `flagged_for_review`.
+- Config value `webhookTimeoutMs` defines the maximum time to wait for a webhook (default 5 minutes).
+- **Admin endpoint** `POST /admin/disbursements/check-timeouts` (Basic Auth) scans for disbursements in `disbursement_queued` whose `created_at` is older than `now - webhookTimeoutMs`, and for each:
+  - Updates the disbursement status to `flagged_for_review`.
+  - Updates the linked application status to `flagged_for_review` (so it appears in the admin list).
+  - Inserts an `application_state_transitions` row with reason `webhook_timeout` and actor `system`.
+- You can call this endpoint on a schedule (e.g. cron) or manually for demos.
+
+#### Loom: how to demo “timeout → flag for review”
+
+1. **Short timeout for demo**: Start the server with a short timeout, e.g. `WEBHOOK_TIMEOUT_MS=15000` (15 seconds).
+2. **Create an approved application**: Submit Scenario 1 (Jane Doe) so you get an `approved` application and its `application_id`. A disbursement row is created in `disbursement_queued` with `created_at = now`.
+3. **Do not send a webhook**: Leave the disbursement waiting.
+4. **Wait**: Wait at least 15 seconds (or whatever `WEBHOOK_TIMEOUT_MS` you set).
+5. **Trigger the check**: Call `POST http://localhost:3000/admin/disbursements/check-timeouts` with Basic Auth (admin / password).
+6. **Expected response**: `200 OK` with body like `{ "message": "Timeout check completed.", "flagged_count": 1, "flagged": [{ "application_id": "<id>", "disbursement_id": 1 }] }`.
+7. **Verify**: Call `GET /admin/applications?status=flagged_for_review` and confirm that application appears; call `GET /admin/applications/:id` for that application and show the transition history including `webhook_timeout` and the disbursement status `flagged_for_review`.
 
 ## Duplicate Rules & Idempotency
 
@@ -199,7 +219,8 @@ Suggested Loom structure:
 1. Architecture overview: code structure, scoring config, interpretation of income tolerance, how `partially_approved` fits into the state machine.
 2. Happy path: submit application → auto-approve → successful disbursement webhook → status `disbursed` (using `scripts/simulate_disbursement.js`).
 3. Failure and retries: webhook failure → automatic retries → multiple audit rows; demo replay vs idempotency handling.
-4. Idempotency and duplicates: duplicate application submissions + webhook replay to show the system is safe.
+4. **Webhook timeout**: no webhook within `webhookTimeoutMs` → call `POST /admin/disbursements/check-timeouts` → application and disbursement move to `flagged_for_review` (see “Loom: how to demo timeout → flag for review” above).
+5. Idempotency and duplicates: duplicate application submissions + webhook replay to show the system is safe.
 
 The implementation will adhere to the architecture and assumptions described here. Once the code is complete, running the commands in this README should be sufficient to reproduce all required demo scenarios.
 
