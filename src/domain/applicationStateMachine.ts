@@ -14,7 +14,7 @@ const disbursementTransitions: Record<DisbursementStatus, DisbursementStatus[]> 
   disbursement_queued: ['disbursed', 'disbursement_failed', 'flagged_for_review'],
   disbursed: [],
   flagged_for_review: [],
-  disbursement_failed: ['disbursement_queued', 'flagged_for_review'],
+  disbursement_failed: ['disbursement_queued', 'flagged_for_review','disbursed'],
 };
 
 export function assertValidApplicationTransition(

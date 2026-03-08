@@ -161,7 +161,23 @@ export async function reviewApplication(
 
   assertValidApplicationTransition(id, current.status, nextStatus);
 
+  const hasDisbursement = await new Promise<boolean>((resolve, reject) => {
+    db.get<{ id: number }>(
+      'SELECT id FROM disbursements WHERE application_id = ? LIMIT 1',
+      [id],
+      (err, row) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(row != null);
+        }
+      },
+    );
+  });
+
   const now = nowIso();
+  const shouldCreateDisbursement =
+    (nextStatus === 'approved' || nextStatus === 'partially_approved') && !hasDisbursement;
 
   await new Promise<void>((resolve, reject) => {
     db.serialize(() => {
@@ -213,6 +229,23 @@ export async function reviewApplication(
         `,
         [id, input.decision, input.note, input.reviewer_id ?? null, now],
       );
+
+      if (shouldCreateDisbursement) {
+        db.run(
+          `
+            INSERT INTO disbursements (
+              application_id,
+              status,
+              transaction_id,
+              retry_count,
+              last_webhook_at,
+              created_at,
+              updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          `,
+          [id, 'disbursement_queued', null, 0, null, now, now],
+        );
+      }
 
       db.run('COMMIT', (err) => {
         if (err) {

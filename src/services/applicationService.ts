@@ -187,6 +187,23 @@ export async function createApplication(
             );
           }
 
+          if (finalStatus === 'approved') {
+            db.run(
+              `
+                INSERT INTO disbursements (
+                  application_id,
+                  status,
+                  transaction_id,
+                  retry_count,
+                  last_webhook_at,
+                  created_at,
+                  updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+              `,
+              [id, 'disbursement_queued', null, 0, null, finalAt, finalAt],
+            );
+          }
+
           db.run('COMMIT', (commitErr) => {
             if (commitErr) {
               reject(commitErr);
