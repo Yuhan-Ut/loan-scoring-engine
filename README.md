@@ -7,7 +7,7 @@ This project implements a Node.js/TypeScript backend for a loan application scor
 - A webhook-driven disbursement flow (with retries, timeouts, and an audit log)
 - Admin endpoints for manual review and partial approvals
 
-> Problem statement reference: `Take-Home, Backend.pdf`.
+
 
 ## Tech Stack
 
@@ -73,7 +73,6 @@ Core structure (aligned with the take-home requirements):
 - `scripts/`:
   - `simulate_disbursement.js`: Webhook simulator (success, failure, replay).
 
-> The implementation will follow this structure as the code is filled in.
 
 ## Scoring Logic & Business Assumptions
 
@@ -167,7 +166,7 @@ Business rules:
 - **Idempotency**: When a webhook arrives with a `transaction_id` that has already been processed to a terminal state (disbursed, disbursement_failed, or flagged_for_review), the handler returns without updating state. Same `transaction_id` replayed = no-op.
 - **Auto-retry and escalation**: On each `failed` webhook we increment `retry_count`. After more than `maxDisbursementRetries` (e.g. 3) failures, we transition the disbursement and the application to `flagged_for_review` (reason: `disbursement_retries_exhausted`). So “3 failures → escalate” is enforced in the backend.
 
-**Who triggers the retries?**
+**How to trigger the retries?**
 
 - **Demo**: The webhook simulator script sends multiple `failed` webhooks (e.g. with `transaction_id` `txn_fail_1`, `txn_fail_2`, `txn_fail_3`). Each is a distinct attempt; the backend counts them and escalates after the 3rd.
 - **Production**: The payment provider (or a backend job that calls them) sends each retry; each attempt typically has its own `transaction_id`. The backend only processes webhooks and enforces count + escalation.
@@ -180,16 +179,6 @@ Business rules:
   - Updates the linked application status to `flagged_for_review` (so it appears in the admin list).
   - Inserts an `application_state_transitions` row with reason `webhook_timeout` and actor `system`.
 - You can call this endpoint on a schedule (e.g. cron) or manually for demos.
-
-#### Loom: how to demo “timeout → flag for review”
-
-1. **Short timeout for demo**: Start the server with a short timeout, e.g. `WEBHOOK_TIMEOUT_MS=15000` (15 seconds).
-2. **Create an approved application**: Submit Scenario 1 (Jane Doe) so you get an `approved` application and its `application_id`. A disbursement row is created in `disbursement_queued` with `created_at = now`.
-3. **Do not send a webhook**: Leave the disbursement waiting.
-4. **Wait**: Wait at least 15 seconds (or whatever `WEBHOOK_TIMEOUT_MS` you set).
-5. **Trigger the check**: Call `POST http://localhost:3000/admin/disbursements/check-timeouts` with Basic Auth (admin / password).
-6. **Expected response**: `200 OK` with body like `{ "message": "Timeout check completed.", "flagged_count": 1, "flagged": [{ "application_id": "<id>", "disbursement_id": 1 }] }`.
-7. **Verify**: Call `GET /admin/applications?status=flagged_for_review` and confirm that application appears; call `GET /admin/applications/:id` for that application and show the transition history including `webhook_timeout` and the disbursement status `flagged_for_review`.
 
 ## Duplicate Rules & Idempotency
 
@@ -206,21 +195,10 @@ Business rules:
   - If this combination has already reached a terminal state (success or final failure), subsequent webhooks with the same pair do not change state.
   - An additional audit row is still inserted with a replay flag for debugging and traceability.
 
-## Test Scenarios & Loom Walkthrough
+## Test Scenarios
 
 The project will include the 1–8 scenarios from the prompt (as JSON inputs or small scripts) to demonstrate:
 
 - Scoring engine decisions (auto-approve / auto-deny / flagged for review).
 - Duplicate submission rejection (scenario 7).
 - Webhook replay idempotency (scenario 8).
-
-Suggested Loom structure:
-
-1. Architecture overview: code structure, scoring config, interpretation of income tolerance, how `partially_approved` fits into the state machine.
-2. Happy path: submit application → auto-approve → successful disbursement webhook → status `disbursed` (using `scripts/simulate_disbursement.js`).
-3. Failure and retries: webhook failure → automatic retries → multiple audit rows; demo replay vs idempotency handling.
-4. **Webhook timeout**: no webhook within `webhookTimeoutMs` → call `POST /admin/disbursements/check-timeouts` → application and disbursement move to `flagged_for_review` (see “Loom: how to demo timeout → flag for review” above).
-5. Idempotency and duplicates: duplicate application submissions + webhook replay to show the system is safe.
-
-The implementation will adhere to the architecture and assumptions described here. Once the code is complete, running the commands in this README should be sufficient to reproduce all required demo scenarios.
-
